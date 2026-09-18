@@ -178,6 +178,10 @@ elif page == "Daily Plan":
     c3.metric("RTM", f"{1 - s['overall_da_share']:.0%}", f"{s['total_rtm_mwh']:.0f} MWh")
     c4.metric("Overrides", s["override_count"])
 
+    if "indicative_revenue_inr" in s:
+        st.metric("Indicative revenue (not a forecast)", f"Rs {s['indicative_revenue_inr']:,.0f}")
+        st.caption(s["indicative_revenue_note"])
+
     plan = out["plan"]
     fig = go.Figure()
     fig.add_trace(go.Bar(x=plan["time"], y=plan["da_mw"], name="DA", marker_color="#1e3a8a"))

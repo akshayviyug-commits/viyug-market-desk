@@ -139,6 +139,12 @@ def run_calibration(df: pd.DataFrame, settled_dates: list, **kwargs) -> pd.DataF
         avg_actual = float(actuals.mean())
         cov = float(actuals.std(ddof=0) / avg_actual) if avg_actual else None
 
+        # Historical per-block average prices - feeds the daily-plan's indicative
+        # revenue estimate (docx sec. 8.2). Not a forecast: tomorrow's prices are
+        # unknown, this is only what these blocks have averaged historically.
+        avg_gdam_mcp = float(block_rows["gdam_mcp"].mean())
+        avg_rtm_mcp = float(block_rows["rtm_mcp"].mean())
+
         rows_out.append({
             "block": block,
             "time": _time_label(block_rows["time"].iloc[0]),
@@ -154,5 +160,7 @@ def run_calibration(df: pd.DataFrame, settled_dates: list, **kwargs) -> pd.DataF
             "baseline_da_share": result["baseline_da_share"],
             "avg_actual_generation_mw": round(avg_actual, 2),
             "coefficient_of_variation": round(cov, 4) if cov is not None else None,
+            "avg_gdam_mcp": round(avg_gdam_mcp, 2),
+            "avg_rtm_mcp": round(avg_rtm_mcp, 2),
         })
     return pd.DataFrame(rows_out)

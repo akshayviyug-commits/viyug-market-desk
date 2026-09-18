@@ -14,6 +14,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from .dsm import ENERGY_FACTOR
+
 STRATEGY_SHARE_COLUMN = {
     "conservative": "da_share_conservative",
     "balanced": "da_share_balanced",
@@ -75,7 +77,8 @@ def build_daily_plan(forecast: pd.DataFrame, calibration: pd.DataFrame,
     warnings = validate_forecast(forecast, avc_by_block)
 
     share_col = STRATEGY_SHARE_COLUMN[strategy]
-    merged = forecast.merge(calibration[["block", "time", share_col]], on="block", how="left")
+    price_cols = [c for c in ("avg_gdam_mcp", "avg_rtm_mcp") if c in calibration.columns]
+    merged = forecast.merge(calibration[["block", "time", share_col] + price_cols], on="block", how="left")
     if merged[share_col].isna().any():
         missing = merged[merged[share_col].isna()]["block"].tolist()
         raise ForecastValidationError(f"No calibrated share for block(s) {missing}.")
@@ -90,9 +93,9 @@ def build_daily_plan(forecast: pd.DataFrame, calibration: pd.DataFrame,
     assert thumb_rule_error < 1e-9, f"Thumb-rule identity violated: max error {thumb_rule_error}"
     assert (merged["da_mw"] >= 0).all() and (merged["rtm_mw"] >= 0).all(), "Negative DA/RTM volume produced."
 
-    total_forecast_mwh = merged["forecast_mw"].sum() * 0.25
-    total_da_mwh = merged["da_mw"].sum() * 0.25
-    total_rtm_mwh = merged["rtm_mw"].sum() * 0.25
+    total_forecast_mwh = merged["forecast_mw"].sum() * ENERGY_FACTOR
+    total_da_mwh = merged["da_mw"].sum() * ENERGY_FACTOR
+    total_rtm_mwh = merged["rtm_mw"].sum() * ENERGY_FACTOR
     overall_da_share = total_da_mwh / total_forecast_mwh if total_forecast_mwh else 0.0
 
     summary = {
@@ -102,6 +105,18 @@ def build_daily_plan(forecast: pd.DataFrame, calibration: pd.DataFrame,
         "overall_da_share": round(overall_da_share, 4),
         "override_count": int(merged["override_flag"].sum()),
     }
+
+    # Indicative revenue (docx sec. 8.2): historical per-block average prices
+    # applied to this plan's split, purely to sanity-check its shape.
+    # Tomorrow's prices are unknown - this is NOT a forecast of P&L.
+    if price_cols == ["avg_gdam_mcp", "avg_rtm_mcp"]:
+        indicative_revenue = (
+            (merged["da_mw"] * merged["avg_gdam_mcp"] + merged["rtm_mw"] * merged["avg_rtm_mcp"]) * ENERGY_FACTOR
+        ).sum()
+        summary["indicative_revenue_inr"] = round(float(indicative_revenue))
+        summary["indicative_revenue_note"] = (
+            "Indicative only - historical per-block average prices, not a forecast of tomorrow's prices."
+        )
 
     plan = merged[["block", "time", "forecast_mw", "da_share_applied", "da_mw", "rtm_mw", "override_flag"]].copy()
     return {"plan": plan, "summary": summary, "warnings": warnings, "strategy": strategy}
