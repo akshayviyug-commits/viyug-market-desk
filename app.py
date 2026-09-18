@@ -4,6 +4,7 @@ Backend: pandas/numpy engine in engine/. Frontend: this file.
 """
 from __future__ import annotations
 
+import base64
 import io
 import sys
 from pathlib import Path
@@ -17,7 +18,44 @@ from engine.loader import load_workbook, SchemaError, DataQualityError
 from engine.calibrate import run_calibration
 from engine.planning import build_daily_plan, validate_forecast, ForecastValidationError
 
-st.set_page_config(page_title="Viyug.AI - Market Desk", layout="wide")
+ASSETS_DIR = Path(__file__).parent / "assets"
+
+st.set_page_config(
+    page_title="Viyug.AI - Market Desk",
+    page_icon=str(ASSETS_DIR / "favicon.png"),
+    layout="wide",
+)
+
+
+def inject_brand_css():
+    css_path = ASSETS_DIR / "style.css"
+    if css_path.exists():
+        st.markdown(f"<style>{css_path.read_text()}</style>", unsafe_allow_html=True)
+
+
+def sidebar_brand():
+    icon_path = ASSETS_DIR / "logo_icon.png"
+    if not icon_path.exists():
+        st.markdown("## Viyug.AI")
+        st.caption("Market Desk")
+        return
+    icon_b64 = base64.b64encode(icon_path.read_bytes()).decode()
+    st.markdown(
+        f"""
+        <div class="viyug-sidebar-brand">
+          <img src="data:image/png;base64,{icon_b64}" />
+          <div class="brand-text">
+            <div class="name">Viyug.AI</div>
+            <div class="tagline">VISION TO VALUE</div>
+          </div>
+        </div>
+        <div class="viyug-sidebar-app">Market Desk</div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+inject_brand_css()
 
 STRATEGY_LABELS = {"conservative": "Conservative", "balanced": "Balanced", "aggressive": "Aggressive"}
 
@@ -32,8 +70,7 @@ def init_state():
 init_state()
 
 with st.sidebar:
-    st.markdown("## Viyug.AI")
-    st.caption("Market Desk")
+    sidebar_brand()
     page = st.radio("Navigate", ["Overview", "Calibration", "Daily Plan", "History"], label_visibility="collapsed")
     st.divider()
     st.markdown("#### Data")
@@ -122,7 +159,7 @@ elif page == "Calibration":
         fig.add_trace(go.Scatter(x=calibration["time"], y=calibration["baseline_da_share"],
                                   mode="lines", name="Baseline (current desk)", line=dict(dash="dot", color="gray")))
         fig.add_trace(go.Scatter(x=calibration["time"], y=calibration[share_col],
-                                  mode="lines", name=STRATEGY_LABELS[strategy], line=dict(color="#1e3a8a")))
+                                  mode="lines", name=STRATEGY_LABELS[strategy], line=dict(color="#1A3E8C")))
         fig.update_layout(yaxis_tickformat=".0%", height=350, margin=dict(t=10, l=10, r=10, b=10),
                            legend=dict(orientation="h", y=1.1))
         st.plotly_chart(fig, use_container_width=True)
@@ -184,8 +221,8 @@ elif page == "Daily Plan":
 
     plan = out["plan"]
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=plan["time"], y=plan["da_mw"], name="DA", marker_color="#1e3a8a"))
-    fig.add_trace(go.Bar(x=plan["time"], y=plan["rtm_mw"], name="RTM", marker_color="#93c5fd"))
+    fig.add_trace(go.Bar(x=plan["time"], y=plan["da_mw"], name="DA", marker_color="#1A3E8C"))
+    fig.add_trace(go.Bar(x=plan["time"], y=plan["rtm_mw"], name="RTM", marker_color="#4A8FE8"))
     fig.update_layout(barmode="stack", height=350, margin=dict(t=10, l=10, r=10, b=10),
                        legend=dict(orientation="h", y=1.1))
     st.plotly_chart(fig, use_container_width=True)
