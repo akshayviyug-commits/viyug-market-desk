@@ -4,6 +4,7 @@ Backend: pandas/numpy engine in engine/. Frontend: this file.
 """
 from __future__ import annotations
 
+import io
 import sys
 from pathlib import Path
 
@@ -39,10 +40,9 @@ with st.sidebar:
     uploaded = st.file_uploader("Upload settlement workbook (.xlsx)", type=["xlsx"])
     if uploaded is not None:
         try:
-            tmp_path = Path("data") / uploaded.name
-            tmp_path.parent.mkdir(exist_ok=True)
-            tmp_path.write_bytes(uploaded.getvalue())
-            st.session_state["load_result"] = load_workbook(str(tmp_path))
+            # Read straight from the in-memory upload - never written to disk,
+            # never leaves this session's server-side memory.
+            st.session_state["load_result"] = load_workbook(io.BytesIO(uploaded.getvalue()))
             st.session_state["calibration"] = None
             st.success(f"Loaded {uploaded.name}")
         except (SchemaError, DataQualityError) as e:

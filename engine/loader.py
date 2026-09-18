@@ -17,6 +17,7 @@ from __future__ import annotations
 import pandas as pd
 import numpy as np
 from dataclasses import dataclass, field
+from pathlib import Path
 
 SHEET_NAME = "5. Detailed sheet"
 HEADER_ROW = 3          # 0-indexed -> Excel row 4
@@ -63,12 +64,15 @@ class LoadResult:
     warnings: list = field(default_factory=list)
 
 
-def _read_raw_sheet(path: str) -> pd.DataFrame:
+def _read_raw_sheet(source) -> pd.DataFrame:
+    """`source` is either a path (str/Path) or an in-memory file-like object
+    (e.g. BytesIO from an uploaded file) - never written to disk either way."""
+    label = source if isinstance(source, (str, Path)) else "the uploaded file"
     try:
-        raw = pd.read_excel(path, sheet_name=SHEET_NAME, header=HEADER_ROW, engine="openpyxl")
+        raw = pd.read_excel(source, sheet_name=SHEET_NAME, header=HEADER_ROW, engine="openpyxl")
     except ValueError as e:
         raise SchemaError(
-            f"Worksheet '{SHEET_NAME}' not found in {path}. "
+            f"Worksheet '{SHEET_NAME}' not found in {label}. "
             f"This system reads that sheet by name; if the desk renamed it, "
             f"update SHEET_NAME in loader.py or rename the sheet back."
         ) from e
@@ -184,8 +188,10 @@ def _run_identity_checks(df: pd.DataFrame, settled_dates: list) -> list:
     return warnings
 
 
-def load_workbook(path: str) -> LoadResult:
-    raw = _read_raw_sheet(path)
+def load_workbook(source) -> LoadResult:
+    """`source`: a file path (str/Path), or an in-memory file-like object
+    (e.g. io.BytesIO from an uploaded file - never touches disk)."""
+    raw = _read_raw_sheet(source)
     df = _map_columns(raw)
     df = _derive_date_only(df)
     df = df.dropna(subset=["date"]).reset_index(drop=True)
