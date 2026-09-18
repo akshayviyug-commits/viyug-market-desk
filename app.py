@@ -5,6 +5,7 @@ Backend: pandas/numpy engine in engine/. Frontend: this file.
 from __future__ import annotations
 
 import base64
+import datetime
 import io
 import sys
 from pathlib import Path
@@ -65,6 +66,16 @@ def init_state():
     st.session_state.setdefault("calibration", None)
     st.session_state.setdefault("strategy", "balanced")
     st.session_state.setdefault("overrides", {})
+    st.session_state.setdefault("run_log", [])       # session-scoped run history (see History page)
+    st.session_state.setdefault("_logged_plans", set())
+
+
+def log_run(kind: str, detail: str):
+    st.session_state["run_log"].insert(0, {
+        "time": datetime.datetime.now().strftime("%H:%M:%S"),
+        "type": kind,
+        "detail": detail,
+    })
 
 
 init_state()
@@ -76,14 +87,21 @@ with st.sidebar:
     st.markdown("#### Data")
     uploaded = st.file_uploader("Upload settlement workbook (.xlsx)", type=["xlsx"])
     if uploaded is not None:
-        try:
-            # Read straight from the in-memory upload - never written to disk,
-            # never leaves this session's server-side memory.
-            st.session_state["load_result"] = load_workbook(io.BytesIO(uploaded.getvalue()))
-            st.session_state["calibration"] = None
-            st.success(f"Loaded {uploaded.name}")
-        except (SchemaError, DataQualityError) as e:
-            st.error(str(e))
+        # st.file_uploader keeps returning the same UploadedFile on every
+        # rerun (not just at upload time) - e.g. clicking a strategy radio
+        # or switching pages also re-enters this block. Only reprocess (and
+        # reset calibration) when the uploaded file has actually changed.
+        file_id = getattr(uploaded, "file_id", None) or (uploaded.name, uploaded.size)
+        if st.session_state.get("_uploaded_file_id") != file_id:
+            try:
+                # Read straight from the in-memory upload - never written to disk,
+                # never leaves this session's server-side memory.
+                st.session_state["load_result"] = load_workbook(io.BytesIO(uploaded.getvalue()))
+                st.session_state["calibration"] = None
+                st.session_state["_uploaded_file_id"] = file_id
+                st.success(f"Loaded {uploaded.name}")
+            except (SchemaError, DataQualityError) as e:
+                st.error(str(e))
 
     default_path = Path(__file__).parent / "sample_data" / "sample_workbook.xlsx"
     if st.session_state["load_result"] is None and default_path.exists():
@@ -144,6 +162,7 @@ elif page == "Calibration":
     if st.button("Run calibration", type="primary"):
         with st.spinner("Backtesting 96 blocks against settled history..."):
             st.session_state["calibration"] = run_calibration(result.df, result.settled_dates)
+        log_run("Calibration", f"{result.n_settled_days} settled days ({settled_start:%d %b} - {settled_end:%d %b %Y})")
         st.success("Calibration complete.")
 
     calibration = st.session_state["calibration"]
@@ -155,6 +174,12 @@ elif page == "Calibration":
         worst_col = f"worst_day_net_revenue_{strategy}"
 
         st.subheader("Recommended DA share by block")
+        st.caption(
+            f"Not tied to a single delivery date - this is the reference table backtested against "
+            f"all {result.n_settled_days} settled days on file "
+            f"({min(result.settled_dates):%d %b} - {max(result.settled_dates):%d %b %Y}), one recommended "
+            f"share per time-of-day block. Daily Plan applies this same table to whichever date you're planning."
+        )
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=calibration["time"], y=calibration["baseline_da_share"],
                                   mode="lines", name="Baseline (current desk)", line=dict(dash="dot", color="gray")))
@@ -205,6 +230,11 @@ elif page == "Daily Plan":
         st.error(str(e))
         st.stop()
 
+    plan_key = (delivery_date, strategy)
+    if plan_key not in st.session_state["_logged_plans"]:
+        st.session_state["_logged_plans"].add(plan_key)
+        log_run("Daily Plan", f"{delivery_date:%d %b %Y} - {STRATEGY_LABELS[strategy]}")
+
     for w in out["warnings"]:
         st.warning(w)
 
@@ -254,7 +284,14 @@ elif page == "Daily Plan":
 # ---------- History ----------
 elif page == "History":
     st.title("History")
-    st.caption("Previous calibration and planning runs.")
-    st.info("This prototype recomputes on demand rather than persisting run history - "
-            "wire this page to the platform's `Run` entity (see PLT-059/CIP domain model) "
-            "once the workflow engine is in place.")
+    st.caption("Runs in this session.")
+    log = st.session_state["run_log"]
+    if not log:
+        st.info("Nothing run yet this session - calibrate or generate a daily plan to see it logged here.")
+    else:
+        st.dataframe(pd.DataFrame(log), use_container_width=True, hide_index=True)
+        st.caption(
+            "This log lives only in your current browser session - it resets on page reload. "
+            "Durable, cross-session history is a platform feature (the `Run` entity in the "
+            "requirements spec) that needs a real backend, not yet wired up in this prototype."
+        )
