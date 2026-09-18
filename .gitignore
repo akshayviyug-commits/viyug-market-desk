@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.pyc
+data/
+*.zip
+ngrok.exe
+ngrok.log
+calibration_output.csv
+calibration_output.json
+.streamlit/secrets.toml
