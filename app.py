@@ -163,6 +163,21 @@ def card():
     return st.container(border=True)
 
 
+# On the shared cloud host the model replays take many minutes, so there they run on request; anywhere else they run automatically.
+HOSTED = os.environ.get("MARKET_DESK_ON_DEMAND") == "1" or str(Path(__file__).resolve()).startswith("/mount/src")
+
+
+def allow(key: str, ready: bool, label: str, hint: str) -> bool:
+    """True when the heavy computation may run now: not hosted, already computed, or the user asked for it."""
+    if not HOSTED or ready or st.session_state.get("go_" + key):
+        return True
+    st.markdown(f'<div class="mk-note">{hint}</div>', unsafe_allow_html=True)
+    if st.button(label, key="btn_" + key):
+        st.session_state["go_" + key] = True
+        st.rerun()
+    return False
+
+
 NICE = {"g_l1": "G-DAM, same block yesterday", "g_nb": "G-DAM, neighbouring blocks yesterday", "g_m3": "G-DAM, 3-day average", "g_m7": "G-DAM, 7-day average",
         "g_all": "G-DAM, all-history average", "dm_l1": "DAM, same block yesterday", "dm_m3": "DAM, 3-day average", "r_l2": "RTM, same block 2 days ago",
         "r_nb": "RTM, neighbouring blocks", "r_m3": "RTM, 3-day average", "r_all": "RTM, all-history average", "sp_m3": "RTM minus G-DAM, 3-day average",
@@ -348,9 +363,12 @@ def render_price_history(ctx: Ctx, T: pd.Timestamp):
                             'cap, the REC alone makes RTM count as ahead, so the share can exceed 50% even when the average favours G-DAM.</div>', unsafe_allow_html=True)
         with c4:
             st.markdown(f'<div class="mk-h">What the G-DAM price model leans on</div>', unsafe_allow_html=True)
-            with st.spinner("Training the price model to see what it leans on (first time only)..."):
-                imp = ctx.importance(T, "g")
-            if len(imp):
+            imp = None
+            if allow("imp", (pd.Timestamp(T), "g") in ctx._imp, "Show what the model leans on",
+                     "Fitting the model to see which inputs it leans on takes a minute or two on this hosted version, so it runs on request."):
+                with st.spinner("Training the price model to see what it leans on (first time only)..."):
+                    imp = ctx.importance(T, "g")
+            if imp is not None and len(imp):
                 top = imp.head(8)[::-1]
                 fig = base_fig(250)
                 fig.add_trace(go.Bar(x=top.values, y=[NICE.get(k, k) for k in top.index], orientation="h", marker_color=NAVY,
@@ -358,13 +376,16 @@ def render_price_history(ctx: Ctx, T: pd.Timestamp):
                 fig.update_xaxes(title="accuracy lost if scrambled (₹/MWh)")
                 fig.update_layout(margin=dict(t=10, l=200, r=10, b=10))
                 st.plotly_chart(fig, width="stretch")
-            else:
+            elif imp is not None:
                 st.info("Not enough history to fit the model yet - it is using yesterday's prices.")
 
-        with st.spinner("Replaying the price model over the recent days (first time only, can take a minute or two)..."):
-            w = ctx.walk()
         st.markdown('<div class="mk-h">Track record — each day forecast using only what was known then</div>', unsafe_allow_html=True)
-        if len(w):
+        w = None
+        if allow("walk", ctx._walk is not None, "Show the model's track record",
+                 "Replaying the model day by day over the recent days takes several minutes on this hosted version, so it runs on request."):
+            with st.spinner("Replaying the price model over the recent days (first time only)..."):
+                w = ctx.walk()
+        if w is not None and len(w):
             c = coverage(w)
             mg, pg = (w.g_p50 - w.y_gdam).abs().mean(), (w.g_anchor - w.y_gdam).abs().mean()
             mr, pr = (w.r_p50 - w.y_rtm).abs().mean(), (w.r_anchor - w.y_rtm).abs().mean()
@@ -482,78 +503,85 @@ def render_split(ctx: Ctx, T: pd.Timestamp):
         fig.update_xaxes(**tick_kw())
         st.plotly_chart(fig, width="stretch")
 
-    # ---------------------------------------------------------------- b
-    with st.spinner("Replaying the split over the recent settled days (first time only, can take a minute or two)..."):
-        rep = ctx.replay(rec, guard)
-    summ = summarise(rep)
-    label = DIAL_LABEL[dial]
-    n_rep = int(summ["Days"].iloc[0])
-    with card():
-        st.markdown(ui.card_title("b · What the split is worth", f"replayed against the last {n_rep} settled days"), unsafe_allow_html=True)
-        st.markdown(f'<div class="mk-sub">The {label} dial was run for each of the last {n_rep} settled days as it would have been that morning — the price model '
-                    f'and Learn using only what was known then — and scored against the wind and prices that actually followed. '
-                    f'Gain is measured against selling the whole forecast on G-DAM.</div>', unsafe_allow_html=True)
-        piv = rep.pivot(index="date", columns="strategy", values="net_inr")
-        gain = (piv[label] - piv[ALL_G]) / 1e5
-        habit_gain = (piv[HABIT] - piv[ALL_G]) / 1e5
-        fig = base_fig(300)
-        x = [f"{d.day} {d:%b}" for d in piv.index]
-        fig.add_trace(go.Bar(x=x, y=gain, name=f"{label}: gain vs all G-DAM", marker_color=[BLUE if v >= 0 else RED for v in gain],
-                             hovertemplate="%{x}: %{y:+.2f} lakh<extra></extra>"))
-        fig.add_trace(go.Scatter(x=x, y=habit_gain, mode="lines+markers", name="Desk habit, no price view", line=dict(color=AMBER, width=1.5, dash="dot"),
-                                 marker=dict(size=5)))
-        fig.update_yaxes(title="₹ lakh per day")
-        fig.add_hline(y=0, line_color="gray")
-        st.plotly_chart(fig, width="stretch")
+    # ---------------------------------------------------------------- b, c: replay (on request when hosted)
+    rep = None
+    if allow("replay", (rec, guard) in ctx._replay, "Replay the split over the recent settled days",
+             "Replaying the split over the recent settled days takes several minutes on this hosted version, so it runs on request. "
+             "It shows what the split would have been worth, and compares the three strategies."):
+        with st.spinner("Replaying the split over the recent settled days (first time only)..."):
+            rep = ctx.replay(rec, guard)
+    if rep is not None:
+        summ = summarise(rep)
+        label = DIAL_LABEL[dial]
+        n_rep = int(summ["Days"].iloc[0])
+        with card():
+            st.markdown(ui.card_title("b · What the split is worth", f"replayed against the last {n_rep} settled days"), unsafe_allow_html=True)
+            st.markdown(f'<div class="mk-sub">The {label} dial was run for each of the last {n_rep} settled days as it would have been that morning — the price model '
+                        f'and Learn using only what was known then — and scored against the wind and prices that actually followed. '
+                        f'Gain is measured against selling the whole forecast on G-DAM.</div>', unsafe_allow_html=True)
+            piv = rep.pivot(index="date", columns="strategy", values="net_inr")
+            gain = (piv[label] - piv[ALL_G]) / 1e5
+            habit_gain = (piv[HABIT] - piv[ALL_G]) / 1e5
+            fig = base_fig(300)
+            x = [f"{d.day} {d:%b}" for d in piv.index]
+            fig.add_trace(go.Bar(x=x, y=gain, name=f"{label}: gain vs all G-DAM", marker_color=[BLUE if v >= 0 else RED for v in gain],
+                                 hovertemplate="%{x}: %{y:+.2f} lakh<extra></extra>"))
+            fig.add_trace(go.Scatter(x=x, y=habit_gain, mode="lines+markers", name="Desk habit, no price view", line=dict(color=AMBER, width=1.5, dash="dot"),
+                                     marker=dict(size=5)))
+            fig.update_yaxes(title="₹ lakh per day")
+            fig.add_hline(y=0, line_color="gray")
+            st.plotly_chart(fig, width="stretch")
 
-        net = piv[label] / 1e5
-        dsm = rep[rep["strategy"] == label]["dsm_inr"].mean()
-        q = lambda s_, p: float(np.quantile(s_, p))
-        head = f"<tr><th>If {T.day} {T:%b} pays like…</th><th class='num'>P10</th><th class='num'>P50</th><th class='num'>P90</th></tr>"
-        r1 = f"<tr><td class='t'>Net revenue, per day</td>" + "".join(f"<td class='num'>{ui.lakh_l(q(net, p))}</td>" for p in (.1, .5, .9)) + "</tr>"
-        r2 = f"<tr><td class='t'>Gain vs all G-DAM, per day</td>" + "".join(
-            f"<td class='num'>{ui.lakh_l(q(gain, p), True)}</td>" for p in (.1, .5, .9)) + "</tr>"
-        st.markdown(f"<table class='mk'>{head}{r1}{r2}</table>", unsafe_allow_html=True)
-        tot = float(gain.sum())
-        st.markdown(ui.callout(
-            f"<b>Expected deviation cost {ui.lakh(dsm)} per day</b> — measured against a free ±10% band around AvC. It is the same for every split, "
-            f"because both legs are sized from the same forecast. Over {n_rep} days the {label} dial "
-            f"{'earned' if tot >= 0 else 'gave up'} {ui.lakh_l(abs(tot))} {'more' if tot >= 0 else 'less'} than selling everything on G-DAM, and better than the desk's habit by "
-            f"{ui.lakh_l(float((gain - habit_gain).sum()), True)}. With this few days a gap of that size is within noise.", "blue"), unsafe_allow_html=True)
-        if guard:
-            st.markdown('<div class="mk-note">The replay cannot credit the forecast-error guardrail for any deviation it might save through RTM revisions, because '
-                        'revisions are not modelled - it shows only the guardrail\'s cost in price terms. Switch it off above to see the difference.</div>',
-                        unsafe_allow_html=True)
+            net = piv[label] / 1e5
+            dsm = rep[rep["strategy"] == label]["dsm_inr"].mean()
+            q = lambda s_, p: float(np.quantile(s_, p))
+            head = f"<tr><th>If {T.day} {T:%b} pays like…</th><th class='num'>P10</th><th class='num'>P50</th><th class='num'>P90</th></tr>"
+            r1 = f"<tr><td class='t'>Net revenue, per day</td>" + "".join(f"<td class='num'>{ui.lakh_l(q(net, p))}</td>" for p in (.1, .5, .9)) + "</tr>"
+            r2 = f"<tr><td class='t'>Gain vs all G-DAM, per day</td>" + "".join(
+                f"<td class='num'>{ui.lakh_l(q(gain, p), True)}</td>" for p in (.1, .5, .9)) + "</tr>"
+            st.markdown(f"<table class='mk'>{head}{r1}{r2}</table>", unsafe_allow_html=True)
+            tot = float(gain.sum())
+            st.markdown(ui.callout(
+                f"<b>Expected deviation cost {ui.lakh(dsm)} per day</b> — measured against a free ±10% band around AvC. It is the same for every split, "
+                f"because both legs are sized from the same forecast. Over {n_rep} days the {label} dial "
+                f"{'earned' if tot >= 0 else 'gave up'} {ui.lakh_l(abs(tot))} {'more' if tot >= 0 else 'less'} than selling everything on G-DAM, and better than the desk's habit by "
+                f"{ui.lakh_l(float((gain - habit_gain).sum()), True)}. With this few days a gap of that size is within noise.", "blue"), unsafe_allow_html=True)
+            if guard:
+                st.markdown('<div class="mk-note">The replay cannot credit the forecast-error guardrail for any deviation it might save through RTM revisions, because '
+                            'revisions are not modelled - it shows only the guardrail\'s cost in price terms. Switch it off above to see the difference.</div>',
+                            unsafe_allow_html=True)
 
-    # ---------------------------------------------------------------- c
-    with card():
-        st.markdown(ui.card_title("c · Three strategies compared", "which split earns most after penalties?"), unsafe_allow_html=True)
-        st.markdown(f'<div class="mk-sub">Same forecast, same prices, same replay days; only the day-ahead / RTM boundary moves. Day-ahead plus RTM adds back to the '
-                    f'forecast in all three. Bars are the average per day over {n_rep} replays.</div>', unsafe_allow_html=True)
-        names = [DIAL_LABEL[d] for d in DIALS]
-        fig = base_fig(300, barmode="stack")
-        show = names + [HABIT, ALL_G]
-        fig.add_trace(go.Bar(x=show, y=[summ.loc[n, "G-DAM leg (Rs lakh/day)"] for n in show], name="G-DAM leg revenue", marker_color=BLUE))
-        fig.add_trace(go.Bar(x=show, y=[summ.loc[n, "RTM leg (Rs lakh/day)"] for n in show], name="RTM leg revenue (incl. REC)", marker_color=NAVY))
-        fig.add_trace(go.Bar(x=show, y=[summ.loc[n, "Avg DSM (Rs lakh/day)"] + summ.loc[n, "Charges (Rs lakh/day)"] for n in show],
-                             name="Deviation cost + charges", marker_color=RED))
-        fig.update_yaxes(title="₹ lakh per day")
-        st.plotly_chart(fig, width="stretch")
-        best = max(names, key=lambda n: summ.loc[n, "Net (Rs lakh/day)"])
-        st.markdown(ui.strategy_table(summ, names + [HABIT, ALL_G], label, best, HABIT, ALL_G), unsafe_allow_html=True)
-        d_h = summ.loc[best, "Net (Rs lakh/day)"] - summ.loc[HABIT, "Net (Rs lakh/day)"]
-        d_a = summ.loc[best, "Net (Rs lakh/day)"] - summ.loc[ALL_G, "Net (Rs lakh/day)"]
-        st.markdown(ui.callout(
-            f"<b>Why {best} leads:</b> it moves furthest on the price signal. It earned {ui.lakh_l(d_h, True)} per day against the desk's habit of "
-            f"about {summ.loc[HABIT, 'Avg G-DAM share']:.0%} day-ahead with no price view, and {ui.lakh_l(d_a, True)} per day against selling everything on G-DAM. "
-            f"<b>None of the three is proven better than simply staying on G-DAM</b> — in this data G-DAM out-paid RTM in most blocks, and {n_rep} days is a short "
-            f"test. What the price view does show is a consistent improvement over a fixed habit.", "amber"), unsafe_allow_html=True)
+        # ---------------------------------------------------------------- c
+        with card():
+            st.markdown(ui.card_title("c · Three strategies compared", "which split earns most after penalties?"), unsafe_allow_html=True)
+            st.markdown(f'<div class="mk-sub">Same forecast, same prices, same replay days; only the day-ahead / RTM boundary moves. Day-ahead plus RTM adds back to the '
+                        f'forecast in all three. Bars are the average per day over {n_rep} replays.</div>', unsafe_allow_html=True)
+            names = [DIAL_LABEL[d] for d in DIALS]
+            fig = base_fig(300, barmode="stack")
+            show = names + [HABIT, ALL_G]
+            fig.add_trace(go.Bar(x=show, y=[summ.loc[n, "G-DAM leg (Rs lakh/day)"] for n in show], name="G-DAM leg revenue", marker_color=BLUE))
+            fig.add_trace(go.Bar(x=show, y=[summ.loc[n, "RTM leg (Rs lakh/day)"] for n in show], name="RTM leg revenue (incl. REC)", marker_color=NAVY))
+            fig.add_trace(go.Bar(x=show, y=[summ.loc[n, "Avg DSM (Rs lakh/day)"] + summ.loc[n, "Charges (Rs lakh/day)"] for n in show],
+                                 name="Deviation cost + charges", marker_color=RED))
+            fig.update_yaxes(title="₹ lakh per day")
+            st.plotly_chart(fig, width="stretch")
+            best = max(names, key=lambda n: summ.loc[n, "Net (Rs lakh/day)"])
+            st.markdown(ui.strategy_table(summ, names + [HABIT, ALL_G], label, best, HABIT, ALL_G), unsafe_allow_html=True)
+            d_h = summ.loc[best, "Net (Rs lakh/day)"] - summ.loc[HABIT, "Net (Rs lakh/day)"]
+            d_a = summ.loc[best, "Net (Rs lakh/day)"] - summ.loc[ALL_G, "Net (Rs lakh/day)"]
+            st.markdown(ui.callout(
+                f"<b>Why {best} leads:</b> it moves furthest on the price signal. It earned {ui.lakh_l(d_h, True)} per day against the desk's habit of "
+                f"about {summ.loc[HABIT, 'Avg G-DAM share']:.0%} day-ahead with no price view, and {ui.lakh_l(d_a, True)} per day against selling everything on G-DAM. "
+                f"<b>None of the three is proven better than simply staying on G-DAM</b> — in this data G-DAM out-paid RTM in most blocks, and {n_rep} days is a short "
+                f"test. What the price view does show is a consistent improvement over a fixed habit.", "amber"), unsafe_allow_html=True)
 
     # ---------------------------------------------------------------- d
     with card():
         st.markdown(ui.card_title(f"d · Final split: {s['gdam_share']:.0%} G-DAM / {s['rtm_share']:.0%} RTM", "the recommendation"), unsafe_allow_html=True)
+        lead = (f"<b>Expected net (P50, replay of the last {n_rep} days): {ui.lakh_l(float(np.median(net)))} per day.</b> Expected deviation cost {ui.lakh(dsm)}. "
+                if rep is not None else "<b>The replay has not been run</b>, so there is no expected net over recent days yet. ")
         st.markdown(ui.callout(
-            f"<b>Expected net (P50, replay of the last {n_rep} days): {ui.lakh_l(float(np.median(net)))} per day.</b> Expected deviation cost {ui.lakh(dsm)}. "
+            lead +
             f"Indicative value of this plan at the model's own median prices: {ui.lakh(s['indicative_revenue_inr'])} "
             f"({ui.lakh(s['indicative_gain_vs_all_gdam_inr'], True)} vs all G-DAM). {s['indicative_note']}", "blue"), unsafe_allow_html=True)
         with st.expander("Edit block overrides"):
