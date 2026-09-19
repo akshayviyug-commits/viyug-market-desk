@@ -54,7 +54,7 @@ class Panel:
     fc: np.ndarray          # day-ahead wind forecast
     avc: np.ndarray
     settled: np.ndarray     # bool per day
-    extra: dict = field(default_factory=dict)   # optional further day x block matrices (e.g. IEX bid stacks)
+    extra: dict = field(default_factory=dict)   # optional further day x block matrices
 
 
 def block_window(block: int) -> int:
@@ -202,7 +202,7 @@ FEATURES = [
 # Features that exist only where the plant's own data does (its forecast, actuals and settlement).
 PLANT_FEATURES = ["acp_l2", "acp_day_l2", "dev_pct_l2", "eve_short_rate", "cf_l2",
                   "fc", "fc_pct", "fc_day_mwh", "fc_ramp4", "fc_shape"]
-# Market-level only: usable on any day the exchange published prices for, with or without the plant.
+# Price-history features only: they need no plant data, so they work on any day that has prices.
 MARKET_FEATURES = [f for f in FEATURES if f not in PLANT_FEATURES]
 
 

@@ -24,6 +24,11 @@ import pandas as pd
 from sklearn.ensemble import HistGradientBoostingRegressor
 from sklearn.inspection import permutation_importance
 
+try:                                    # same model, fitted far faster; scikit-learn's version is the fallback
+    from lightgbm import LGBMRegressor
+except Exception:                       # pragma: no cover - depends on the host
+    LGBMRegressor = None
+
 from .features import CAP, FEATURES, Policy
 
 MIN_TRAIN_ROWS = 288        # three days of blocks
@@ -39,6 +44,7 @@ class ModelConfig:
     l2_regularization: float = 1.0
     blend_w: float = 0.5        # weight on the boosted model; the rest is the persistence anchor
     seed: int = 0
+    backend: str = "auto"       # "auto": LightGBM when installed, else scikit-learn; same settings either way
 
 
 # market -> (anchor feature order, target column)
@@ -69,7 +75,7 @@ class PriceModel:
         self.cfg = cfg
         self.quantiles = tuple(quantiles)
         self.features = list(features) if features is not None else list(FEATURES)
-        self.models: dict[str, dict[float, HistGradientBoostingRegressor]] = {}
+        self.models: dict[str, dict[float, object]] = {}
         self.cols: dict[str, list[str]] = {}     # features that actually vary in the training window
         self.fallback: dict[str, float] = {}
         self.resid_band: dict[str, tuple[float, float]] = {}
@@ -78,8 +84,15 @@ class PriceModel:
         self.n_days: dict[str, int] = {}
         self._train: dict[str, pd.DataFrame] = {}
 
-    def _gbm(self, q: float) -> HistGradientBoostingRegressor:
+    def _gbm(self, q: float):
         c = self.cfg
+        if LGBMRegressor is not None and c.backend in ("auto", "lightgbm"):
+            # the same quantile model with the same settings: shallow trees (depth 3, 8 leaves), 150 rounds,
+            # learning rate 0.05, at least 40 rows per leaf, L2 = 1
+            return LGBMRegressor(
+                objective="quantile", alpha=q, n_estimators=c.max_iter, learning_rate=c.learning_rate, max_depth=c.max_depth,
+                num_leaves=2 ** c.max_depth, min_child_samples=c.min_samples_leaf, reg_lambda=c.l2_regularization,
+                random_state=c.seed, n_jobs=1, verbose=-1, deterministic=True, force_row_wise=True)
         return HistGradientBoostingRegressor(
             loss="quantile", quantile=q, max_depth=c.max_depth, max_iter=c.max_iter,
             learning_rate=c.learning_rate, min_samples_leaf=c.min_samples_leaf,

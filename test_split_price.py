@@ -114,11 +114,11 @@ def test_real_forecast_runs(b, T, label):
 if __name__ == "__main__":
     runs = []
     bs = build_bundle(str(SAMPLE))
-    runs.append(("sample workbook (workbook-only mode)", bs, pd.Timestamp(bs.workbook.forecast_only_dates[-1])))
+    runs.append(("sample workbook", bs, pd.Timestamp(bs.workbook.forecast_only_dates[-1])))
     real = Path(os.environ.get("MARKET_DESK_REAL_WORKBOOK", "/nonexistent"))
     if real.exists():
-        br = build_bundle(str(real), iex_dir=os.environ.get("MARKET_DESK_IEX_DIR") or None)
-        runs.append((f"real workbook ({br.mode} mode)", br, pd.Timestamp(br.workbook.forecast_only_dates[-1])))
+        br = build_bundle(str(real))
+        runs.append(("real workbook", br, pd.Timestamp(br.workbook.forecast_only_dates[-1])))
     for label, b, T in runs:
         test_identities(b, T, label)
         test_guardrail_and_dials(b, T, label)

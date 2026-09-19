@@ -1,7 +1,6 @@
 venv/
 __pycache__/
 *.pyc
-data/iex/
 data/*.xlsx
 *.zip
 ngrok.exe
@@ -10,5 +9,3 @@ calibration_output.csv
 calibration_output.json
 .streamlit/secrets.toml
 
-# exchange price exports are licensed for personal use: never commit them
-*Snapshot*.xlsx

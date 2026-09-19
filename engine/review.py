@@ -1,7 +1,7 @@
 """
 Numbers behind the Learn page: what happened on recent settled days, and what the price history says.
 
-Everything is computed from the uploaded workbook and IEX files; nothing is typed in. Settlement rules match
+Everything is computed from the uploaded workbook; nothing is typed in. Settlement rules match
 engine.dsm (bands as % of AvC, ACP-based rates) and the sheet's REC convention (Rs300/MWh on DAC, DAM and
 RTM, none on G-DAM).
 """
