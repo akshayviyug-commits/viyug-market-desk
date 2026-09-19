@@ -7,6 +7,13 @@ Upload the settlement workbook in the sidebar. Nothing is written to disk.
 """
 from __future__ import annotations
 
+import os
+
+# Shared hosts report every core of the machine while granting a fraction of one; the boosting library then
+# runs far too many threads and crawls. Cap them before numpy / scikit-learn are imported.
+for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_var, "2")
+
 import argparse
 import base64
 import io
@@ -97,15 +104,11 @@ class Ctx:
         return self._imp[key]
 
 
-@st.cache_resource(show_spinner="Preparing the price model on the days on file (a minute or two the first time)...", max_entries=3)
-def make_ctx(_key: str, _bundle: DataBundle, plant: str, warm_date) -> Ctx:
-    """Built and warmed once per data load. Streamlit holds a lock per key, so a second session opening the same
-    data waits for this instead of repeating the work."""
-    ctx = Ctx(_bundle, plant)
-    ctx.fc.forecast(warm_date)
-    ctx.walk()
-    ctx.replay(300.0, True)
-    return ctx
+@st.cache_resource(show_spinner="Preparing the data...", max_entries=3)
+def make_ctx(_key: str, _bundle: DataBundle, plant: str) -> Ctx:
+    """Built once per data load and shared. The heavy model work is NOT done here: each page computes what it needs
+    behind its own spinner, so the top of a page appears at once and the slower sections fill in."""
+    return Ctx(_bundle, plant)
 
 
 @st.cache_resource(show_spinner=False, max_entries=2)
@@ -345,7 +348,8 @@ def render_price_history(ctx: Ctx, T: pd.Timestamp):
                             'cap, the REC alone makes RTM count as ahead, so the share can exceed 50% even when the average favours G-DAM.</div>', unsafe_allow_html=True)
         with c4:
             st.markdown(f'<div class="mk-h">What the G-DAM price model leans on</div>', unsafe_allow_html=True)
-            imp = ctx.importance(T, "g")
+            with st.spinner("Training the price model to see what it leans on (first time only)..."):
+                imp = ctx.importance(T, "g")
             if len(imp):
                 top = imp.head(8)[::-1]
                 fig = base_fig(250)
@@ -357,7 +361,8 @@ def render_price_history(ctx: Ctx, T: pd.Timestamp):
             else:
                 st.info("Not enough history to fit the model yet - it is using yesterday's prices.")
 
-        w = ctx.walk()
+        with st.spinner("Replaying the price model over the recent days (first time only, can take a minute or two)..."):
+            w = ctx.walk()
         st.markdown('<div class="mk-h">Track record — each day forecast using only what was known then</div>', unsafe_allow_html=True)
         if len(w):
             c = coverage(w)
@@ -478,7 +483,8 @@ def render_split(ctx: Ctx, T: pd.Timestamp):
         st.plotly_chart(fig, width="stretch")
 
     # ---------------------------------------------------------------- b
-    rep = ctx.replay(rec, guard)
+    with st.spinner("Replaying the split over the recent settled days (first time only, can take a minute or two)..."):
+        rep = ctx.replay(rec, guard)
     summ = summarise(rep)
     label = DIAL_LABEL[dial]
     n_rep = int(summ["Days"].iloc[0])
@@ -599,7 +605,7 @@ all_dates = sorted(pd.Timestamp(d) for d in bundle.workbook.df["date"].unique())
 fdates = {pd.Timestamp(d) for d in bundle.workbook.forecast_only_dates}
 default_T = max(fdates) if fdates else all_dates[-1]
 
-ctx = make_ctx(repr(key), bundle, ARGS.plant, default_T)
+ctx = make_ctx(repr(key), bundle, ARGS.plant)
 with st.sidebar:
     for n in bundle.notes:
         st.warning(n)
