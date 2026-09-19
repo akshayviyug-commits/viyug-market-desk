@@ -1,5 +1,6 @@
 pandas>=2.2
 numpy>=1.26
 openpyxl>=3.1
-streamlit>=1.38
+streamlit>=1.52
 plotly>=5.22
+scikit-learn>=1.4
