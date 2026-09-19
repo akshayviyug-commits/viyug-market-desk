@@ -306,7 +306,7 @@ def render_price_history(ctx: Ctx, T: pd.Timestamp):
             sun, wkd = float(t.loc[6, "mean"]), wk["weekday_mean"]
             if np.isfinite(sun) and wkd > 0:
                 st.markdown(f'<div class="mk-note">Sundays average {abs(sun / wkd - 1):.0%} {"below" if sun < wkd else "above"} weekdays. '
-                            f'Each weekday has only {int(t["n"].min())}–{int(t["n"].max())} observations on file.</div>', unsafe_allow_html=True)
+                            f'Each weekday has only {int(t["n"].min()) if t["n"].min() == t["n"].max() else str(int(t["n"].min())) + "–" + str(int(t["n"].max()))} observations on file.</div>', unsafe_allow_html=True)
             if wk["holidays"]:
                 items = "; ".join(f'{h["date"].day} {h["date"]:%b} {h["name"]} (₹{h["price"]:,.0f})' for h in wk["holidays"][:4])
                 st.markdown(f'<div class="mk-note">Weekday holidays in the window vs the weekday average of ₹{wkd:,.0f}: {items}. '
@@ -314,15 +314,19 @@ def render_price_history(ctx: Ctx, T: pd.Timestamp):
         with c2:
             cr = cap_runs(panel, "gdam")
             st.markdown(f'<div class="mk-h">Continuous high-price stretches — G-DAM at the cap</div>', unsafe_allow_html=True)
-            fig = base_fig(250)
-            fig.add_trace(go.Histogram(x=cr["runs"], xbins=dict(start=0.5, end=max(cr["longest"], 8) + 0.5, size=2), marker_color=NAVY,
-                                       hovertemplate="%{x} blocks in a row: %{y} stretches<extra></extra>"))
-            fig.update_xaxes(title="blocks in a row at the cap (4 blocks = 1 hour)")
-            fig.update_yaxes(title="stretches")
-            st.plotly_chart(fig, width="stretch")
-            st.markdown(f'<div class="mk-note">G-DAM sat at the cap in {cr["share"]:.0%} of blocks over {cr["n_days"]} days. Once at the cap it stayed there '
-                        f'a median of {cr["median"]:.0f} blocks ({cr["median"] / 4:.1f} h), the longest {cr["longest"]} blocks ({cr["longest"] / 4:.1f} h).</div>',
-                        unsafe_allow_html=True)
+            if not cr["runs"]:
+                st.markdown(f'<div class="mk-note">G-DAM never reached the ₹10,000 price cap in these {cr["n_days"]} days, so there are no high-price stretches to show.</div>',
+                            unsafe_allow_html=True)
+            else:
+                fig = base_fig(250)
+                fig.add_trace(go.Histogram(x=cr["runs"], xbins=dict(start=0.5, end=max(cr["longest"], 8) + 0.5, size=2), marker_color=NAVY,
+                                           hovertemplate="%{x} blocks in a row: %{y} stretches<extra></extra>"))
+                fig.update_xaxes(title="blocks in a row at the cap (4 blocks = 1 hour)")
+                fig.update_yaxes(title="stretches")
+                st.plotly_chart(fig, width="stretch")
+                st.markdown(f'<div class="mk-note">G-DAM sat at the cap in {cr["share"]:.0%} of blocks over {cr["n_days"]} days. Once at the cap it stayed there '
+                            f'a median of {cr["median"]:.0f} blocks ({cr["median"] / 4:.1f} h), the longest {cr["longest"]} blocks ({cr["longest"] / 4:.1f} h).</div>',
+                            unsafe_allow_html=True)
 
         c3, c4 = st.columns(2)
         with c3:
@@ -426,7 +430,7 @@ def render_split(ctx: Ctx, T: pd.Timestamp):
         st.markdown(ui.cluster_split_table(ct, "C-3"), unsafe_allow_html=True)
         lo, hi = plan["da_share_applied"].min(), plan["da_share_applied"].max()
         st.markdown(f'<div class="mk-note">Shaded row: the evening slot, where the wind forecast misses most. Volume the plan holds for RTM: '
-                    f'{s["blocks_price_rtm"]} blocks because the price favours RTM, {s["blocks_held_back"]} held back by the forecast-error guardrail.</div>',
+                    f'{s["blocks_price_rtm"]} block{"" if s["blocks_price_rtm"] == 1 else "s"} because the price favours RTM, {s["blocks_held_back"]} held back by the forecast-error guardrail.</div>',
                     unsafe_allow_html=True)
 
         st.markdown('<div class="mk-h">The split, block by block</div>', unsafe_allow_html=True)
@@ -510,8 +514,9 @@ def render_split(ctx: Ctx, T: pd.Timestamp):
         st.markdown(ui.callout(
             f"<b>Expected deviation cost {ui.lakh(dsm)} per day</b> — measured against a free ±10% band around AvC. It is the same for every split, "
             f"because both legs are sized from the same forecast. Over {n_rep} days the {label} dial "
-            f"{'earned' if tot >= 0 else 'gave up'} {ui.lakh_l(abs(tot))} {'more' if tot >= 0 else 'less'} than selling everything on G-DAM, and better than the desk's habit by "
-            f"{ui.lakh_l(float((gain - habit_gain).sum()), True)}. With this few days a gap of that size is within noise.", "blue"), unsafe_allow_html=True)
+            f"earned {ui.lakh_l(abs(tot))} {'more' if tot >= 0 else 'less'} than selling everything on G-DAM, and "
+            f"{ui.lakh_l(abs(float((gain - habit_gain).sum())))} {'more' if float((gain - habit_gain).sum()) >= 0 else 'less'} than the desk's habit. "
+            f"With this few days a gap of that size is within noise.", "blue"), unsafe_allow_html=True)
         if guard:
             st.markdown('<div class="mk-note">The replay cannot credit the forecast-error guardrail for any deviation it might save through RTM revisions, because '
                         'revisions are not modelled - it shows only the guardrail\'s cost in price terms. Switch it off above to see the difference.</div>',
@@ -535,11 +540,17 @@ def render_split(ctx: Ctx, T: pd.Timestamp):
         st.markdown(ui.strategy_table(summ, names + [HABIT, ALL_G], label, best, HABIT, ALL_G), unsafe_allow_html=True)
         d_h = summ.loc[best, "Net (Rs lakh/day)"] - summ.loc[HABIT, "Net (Rs lakh/day)"]
         d_a = summ.loc[best, "Net (Rs lakh/day)"] - summ.loc[ALL_G, "Net (Rs lakh/day)"]
+        more = lambda v: f"{ui.lakh_l(abs(v))} {'more' if v >= 0 else 'less'}"
+        verdict = (f"Over {n_rep} replayed days it also beat selling everything on G-DAM, but a gap this size is within noise on a test this short."
+                   if d_a > 0 else
+                   f"<b>None of the three is proven better than simply staying on G-DAM</b> over these {n_rep} days, and that is a short test.")
+        habit_note = (" The price view did improve on a fixed habit." if d_h > 0 else " The price view did not improve on a fixed habit here.")
+        rt_note = (" In this window, volume sent to real time earned less than the same volume on G-DAM."
+                   if summ.loc[ALL_G, "Net (Rs lakh/day)"] > summ.loc[HABIT, "Net (Rs lakh/day)"] else "")
         st.markdown(ui.callout(
-            f"<b>Why {best} leads:</b> it moves furthest on the price signal. It earned {ui.lakh_l(d_h, True)} per day against the desk's habit of "
-            f"about {summ.loc[HABIT, 'Avg G-DAM share']:.0%} day-ahead with no price view, and {ui.lakh_l(d_a, True)} per day against selling everything on G-DAM. "
-            f"<b>None of the three is proven better than simply staying on G-DAM</b> — in this data G-DAM out-paid RTM in most blocks, and {n_rep} days is a short "
-            f"test. What the price view does show is a consistent improvement over a fixed habit.", "amber"), unsafe_allow_html=True)
+            f"<b>Highest net of the three: {best}.</b> It earned {more(d_h)} per day than the desk's habit of about "
+            f"{summ.loc[HABIT, 'Avg G-DAM share']:.0%} day-ahead with no price view, and {more(d_a)} per day than selling everything on G-DAM. "
+            f"{verdict}{habit_note}{rt_note}", "amber"), unsafe_allow_html=True)
 
     # ---------------------------------------------------------------- d
     with card():

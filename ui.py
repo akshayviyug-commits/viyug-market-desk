@@ -59,8 +59,8 @@ def pattern_text(s: dict) -> str:
     if eve >= rest:
         text += (f"Mean absolute deviation ran {eve:.1f}% of AvC in the evening blocks against {rest:.1f}% across the rest of the day. ")
     else:
-        text += (f"Mean absolute deviation ran {rest:.1f}% of AvC outside the evening against {eve:.1f}% in it — "
-                 f"on these days the misses were not an evening problem. ")
+        text += (f"Mean absolute deviation ran {eve:.1f}% of AvC in the evening blocks against {rest:.1f}% across the rest of the day, "
+                 f"so the largest misses were not in the evening. ")
     if np.isfinite(p):
         if p >= 0:
             text += (f"Real-time cleared ₹{p:.2f}/unit above the day-ahead price actually achieved — so holding some volume back "
