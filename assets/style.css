@@ -87,6 +87,12 @@ div[data-testid="stMetric"] {
 }
 div[data-testid="stMetricLabel"] { color: var(--v-slate-500); font-weight: 600; }
 div[data-testid="stMetricValue"] { color: var(--v-navy-900); font-weight: 800; }
+/* never clip a figure with "..." - wrap it and let the size follow the width */
+div[data-testid="stMetricValue"], div[data-testid="stMetricValue"] > div,
+div[data-testid="stMetricLabel"], div[data-testid="stMetricLabel"] * {
+  white-space: normal !important; overflow: visible !important; text-overflow: clip !important;
+}
+div[data-testid="stMetricValue"] { font-size: clamp(1.15rem, 1.9vw, 1.9rem); line-height: 1.15; }
 
 /* ---------- Buttons ---------- */
 .stButton > button, .stDownloadButton > button {
