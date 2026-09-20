@@ -16,6 +16,7 @@ for _var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
 
 import argparse
 import base64
+import hashlib
 import io
 import sys
 from pathlib import Path
@@ -32,7 +33,8 @@ from engine.bundle import DataBundle, build_bundle
 from engine.loader import DataQualityError, SchemaError
 from engine.planning import ForecastValidationError
 from engine.price_forecast import Forecaster, coverage
-from engine.review import CLUSTER_SLOT, cap_runs, price_matrix, review_days, spread_by_cluster, weekday_effect
+from engine.features import CAP
+from engine.review import CLUSTER_SLOT, default_high_threshold, high_runs, price_matrix, review_days, spread_by_cluster, weekday_effect
 from engine.split_backtest import ALL_G, HABIT, replay, summarise
 from engine.split_price import CLUSTER_NAME, DIAL_LABEL, DIAL_TILT, cluster_table, price_split
 
@@ -102,11 +104,23 @@ class Ctx:
         return self._imp[key]
 
 
-@st.cache_resource(show_spinner="Preparing the data...", max_entries=3)
-def make_ctx(_key: str, _bundle: DataBundle, plant: str) -> Ctx:
-    """Built once per data load and shared. The heavy model work is NOT done here: each page computes what it needs
-    behind its own spinner, so the top of a page appears at once and the slower sections fill in."""
+@st.cache_resource(show_spinner=False, max_entries=3)
+def shared_ctx(key: str, _bundle: DataBundle, plant: str) -> Ctx:
+    """Shared across sessions, for data that belongs to the server (the sample workbook, or a file passed on the command
+    line). `key` must not start with an underscore, or Streamlit leaves it out of the cache key. The heavy model work is
+    not done here: each page computes what it needs behind its own spinner."""
     return Ctx(_bundle, plant)
+
+
+def get_ctx(bundle: DataBundle, key: tuple) -> Ctx:
+    """A workbook a user uploads is held only in that user's session, never in a cache other sessions can reach."""
+    if key[0][0] == "upload":
+        ss = st.session_state
+        sig = repr(key)
+        if ss.get("_ctx_sig") != sig:
+            ss["_ctx"], ss["_ctx_sig"] = Ctx(bundle, ARGS.plant), sig
+        return ss["_ctx"]
+    return shared_ctx(repr(key), bundle, ARGS.plant)
 
 
 @st.cache_resource(show_spinner=False, max_entries=2)
@@ -118,7 +132,8 @@ def get_bundle(wb_up, use_sample: bool):
     """Build (or reuse) the data bundle for whatever workbook is currently supplied."""
     ss = st.session_state
     if wb_up is not None:
-        wb_src, wb_id = io.BytesIO(wb_up.getvalue()), ("upload", wb_up.name, wb_up.size)
+        raw = wb_up.getvalue()
+        wb_src, wb_id = io.BytesIO(raw), ("upload", hashlib.sha256(raw).hexdigest()[:20])   # identified by content, not by name
     elif use_sample:
         wb_src, wb_id = str(Path(__file__).parent / "sample_data" / "sample_workbook.xlsx"), ("sample",)
     elif ARGS.workbook and Path(ARGS.workbook).exists():
@@ -279,53 +294,71 @@ def render_price_history(ctx: Ctx, T: pd.Timestamp):
     panel = b.panel
     with card():
         st.markdown(ui.card_title("c · What the price history says", "read from the prices in your workbook"), unsafe_allow_html=True)
-        st.markdown('<div class="mk-sub">The price model learns from these patterns. Dark navy cells are blocks that sat at the ₹10,000 price cap.</div>',
-                    unsafe_allow_html=True)
+        st.markdown('<div class="mk-sub">The price model learns from these patterns. Darker cells are higher prices; each scale runs up to the highest '
+                    'price in that market\'s window.</div>', unsafe_allow_html=True)
         for market, label in (("gdam", "G-DAM"), ("rtm", "RTM")):
             d, m = price_matrix(panel, market, 30)
             fig = base_fig(230)
-            fig.add_trace(go.Heatmap(z=m, x=times(), y=[f"{x.day} {x:%b}" for x in d], zmin=0, zmax=10000, xgap=0, ygap=1,
+            zmax = float(np.nanmax(m)) if np.isfinite(m).any() else 10000.0
+            fig.add_trace(go.Heatmap(z=m, x=times(), y=[f"{x.day} {x:%b}" for x in d], zmin=0, zmax=zmax, xgap=0, ygap=1,
                                      colorscale=[[0, "#EAF2FE"], [0.55, BLUE], [0.99, "#1A3E8C"], [1, "#0A1E52"]],
                                      colorbar=dict(title="₹/MWh", thickness=10, len=.9),
                                      hovertemplate="%{y} %{x}<br>₹%{z:,.0f}/MWh<extra>" + label + "</extra>"))
             fig.update_xaxes(**tick_kw())
             fig.update_yaxes(autorange="reversed", type="category", tickmode="auto", nticks=6)
-            st.markdown(f'<div class="mk-h">{label}, last {len(d)} days with prices</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="mk-h">{label}, last {len(d)} days with prices · scale up to ₹{zmax:,.0f}/MWh</div>', unsafe_allow_html=True)
             st.plotly_chart(fig, width="stretch")
 
         c1, c2 = st.columns(2)
         wk = weekday_effect(panel)
         with c1:
-            st.markdown(f'<div class="mk-h">Day of week — {wk["market"]} daily average, {wk["n_days"]} days</div>', unsafe_allow_html=True)
-            t = wk["table"]
-            fig = base_fig(250)
-            fig.add_trace(go.Bar(x=t["day"], y=t["mean"], marker_color=[BLUE] * 5 + ["#9DB9EC", NAVY], text=[f"n={n}" for n in t["n"]],
-                                 textposition="outside", hovertemplate="%{x}: ₹%{y:,.0f}/MWh<extra></extra>"))
+            st.markdown('<div class="mk-h">Day of week — average daily price, G-DAM and RTM</div>', unsafe_allow_html=True)
+            fig = base_fig(250, barmode="group")
+            for key_, name, colour in (("gdam", "G-DAM", BLUE), ("rtm", "RTM", NAVY)):
+                t = wk[key_]["table"]
+                fig.add_trace(go.Bar(x=t["day"], y=t["mean"], name=name, marker_color=colour,
+                                     hovertemplate="%{x}: ₹%{y:,.0f}/MWh (" + name + ")<extra></extra>"))
             fig.update_yaxes(title="₹/MWh", rangemode="tozero")
             st.plotly_chart(fig, width="stretch")
-            sun, wkd = float(t.loc[6, "mean"]), wk["weekday_mean"]
-            if np.isfinite(sun) and wkd > 0:
-                st.markdown(f'<div class="mk-note">Sundays average {abs(sun / wkd - 1):.0%} {"below" if sun < wkd else "above"} weekdays. '
-                            f'Each weekday has only {int(t["n"].min()) if t["n"].min() == t["n"].max() else str(int(t["n"].min())) + "–" + str(int(t["n"].max()))} observations on file.</div>', unsafe_allow_html=True)
-            if wk["holidays"]:
-                items = "; ".join(f'{h["date"].day} {h["date"]:%b} {h["name"]} (₹{h["price"]:,.0f})' for h in wk["holidays"][:4])
-                st.markdown(f'<div class="mk-note">Weekday holidays in the window vs the weekday average of ₹{wkd:,.0f}: {items}. '
+            notes = []
+            for key_, name in (("gdam", "G-DAM"), ("rtm", "RTM")):
+                t, wkd = wk[key_]["table"], wk[key_]["weekday_mean"]
+                sun = float(t.loc[6, "mean"])
+                if np.isfinite(sun) and wkd > 0:
+                    notes.append(f"{name} on Sundays averages {abs(sun / wkd - 1):.0%} {'below' if sun < wkd else 'above'} weekdays")
+            counts = wk["gdam"]["table"]["n"]
+            n_txt = str(int(counts.min())) if counts.min() == counts.max() else f"{int(counts.min())}–{int(counts.max())}"
+            if notes:
+                st.markdown(f'<div class="mk-note">{"; ".join(notes)}. Each weekday has only {n_txt} observations on file.</div>', unsafe_allow_html=True)
+            hol = wk["gdam"]["holidays"]
+            if hol:
+                items = "; ".join(f'{h["date"].day} {h["date"]:%b} {h["name"]} (₹{h["price"]:,.0f})' for h in hol[:4])
+                st.markdown(f'<div class="mk-note">Weekday holidays in the window vs the G-DAM weekday average of ₹{wk["gdam"]["weekday_mean"]:,.0f}: {items}. '
                             f'Too few to call a holiday effect yet.</div>', unsafe_allow_html=True)
         with c2:
-            cr = cap_runs(panel, "gdam")
-            st.markdown(f'<div class="mk-h">Continuous high-price stretches — G-DAM at the cap</div>', unsafe_allow_html=True)
-            if not cr["runs"]:
-                st.markdown(f'<div class="mk-note">G-DAM never reached the ₹10,000 price cap in these {cr["n_days"]} days, so there are no high-price stretches to show.</div>',
+            g_all = panel.gdam[np.isfinite(panel.gdam)]
+            default_thr = default_high_threshold(panel, "gdam")
+            lo_thr = float(max(500.0, np.floor(g_all.min() / 100) * 100)) if g_all.size else 500.0
+            hi_thr = float(min(CAP, np.ceil(g_all.max() / 100) * 100)) if g_all.size else float(CAP)
+            if lo_thr >= hi_thr:
+                lo_thr = max(hi_thr - 100.0, 0.0)
+            sig = hashlib.md5(panel.gdam.tobytes()).hexdigest()[:8]
+            thr = st.slider("What counts as a high G-DAM price (₹/MWh)", lo_thr, hi_thr, float(np.clip(default_thr, lo_thr, hi_thr)), step=100.0,
+                            key=f"hp_{sig}", help="Starts at this workbook's average G-DAM price plus half a standard deviation; move it to test another level.")
+            hr = high_runs(panel, "gdam", thr)
+            st.markdown(f'<div class="mk-h">Continuous high-price stretches — G-DAM at or above ₹{thr:,.0f}</div>', unsafe_allow_html=True)
+            if not hr["runs"]:
+                st.markdown(f'<div class="mk-note">G-DAM never reached ₹{thr:,.0f}/MWh in these {hr["n_days"]} days; lower the threshold to see stretches.</div>',
                             unsafe_allow_html=True)
             else:
                 fig = base_fig(250)
-                fig.add_trace(go.Histogram(x=cr["runs"], xbins=dict(start=0.5, end=max(cr["longest"], 8) + 0.5, size=2), marker_color=NAVY,
+                fig.add_trace(go.Histogram(x=hr["runs"], xbins=dict(start=0.5, end=max(hr["longest"], 8) + 0.5, size=2), marker_color=NAVY,
                                            hovertemplate="%{x} blocks in a row: %{y} stretches<extra></extra>"))
-                fig.update_xaxes(title="blocks in a row at the cap (4 blocks = 1 hour)")
+                fig.update_xaxes(title="blocks in a row at or above the threshold (4 blocks = 1 hour)")
                 fig.update_yaxes(title="stretches")
                 st.plotly_chart(fig, width="stretch")
-                st.markdown(f'<div class="mk-note">G-DAM sat at the cap in {cr["share"]:.0%} of blocks over {cr["n_days"]} days. Once at the cap it stayed there '
-                            f'a median of {cr["median"]:.0f} blocks ({cr["median"] / 4:.1f} h), the longest {cr["longest"]} blocks ({cr["longest"] / 4:.1f} h).</div>',
+                st.markdown(f'<div class="mk-note">G-DAM was at or above ₹{thr:,.0f}/MWh in {hr["share"]:.0%} of blocks over {hr["n_days"]} days. Once there it stayed '
+                            f'a median of {hr["median"]:.0f} blocks ({hr["median"] / 4:.1f} h), the longest {hr["longest"]} blocks ({hr["longest"] / 4:.1f} h).</div>',
                             unsafe_allow_html=True)
 
         c3, c4 = st.columns(2)
@@ -460,7 +493,8 @@ def render_split(ctx: Ctx, T: pd.Timestamp):
 
         st.markdown('<div class="mk-h">What the price model expects</div>', unsafe_allow_html=True)
         st.markdown(f'<div class="mk-sub">Median forecast with a calibrated P10–P90 band for each market; RTM includes the REC so the two lines compare like for like. '
-                    f'Trained on {info["train_days_g"]} days of G-DAM and {info["train_days_r"]} days of RTM prices known at bid time.</div>', unsafe_allow_html=True)
+                    f'Trained on {info["train_days_g"]} days of G-DAM and {info["train_days_r"]} days of RTM prices known at bid time: G-DAM prices are known up to the '
+                    f'day before delivery, RTM prices only up to two days before, because the day before is still trading when the bid is made.</div>', unsafe_allow_html=True)
         fig = base_fig(300)
         for m, name, colour, fill, add in (("g", "G-DAM", BLUE, "rgba(91,139,223,.18)", 0.0), ("r", "RTM + REC", NAVY, "rgba(10,34,115,.12)", rec)):
             fig.add_trace(go.Scatter(x=t, y=plan[f"{m}_p90"] + add, mode="lines", line=dict(width=0), hoverinfo="skip", showlegend=False))
@@ -608,7 +642,7 @@ all_dates = sorted(pd.Timestamp(d) for d in bundle.workbook.df["date"].unique())
 fdates = {pd.Timestamp(d) for d in bundle.workbook.forecast_only_dates}
 default_T = max(fdates) if fdates else all_dates[-1]
 
-ctx = make_ctx(repr(key), bundle, ARGS.plant)
+ctx = get_ctx(bundle, key)
 with st.sidebar:
     for n in bundle.notes:
         st.warning(n)

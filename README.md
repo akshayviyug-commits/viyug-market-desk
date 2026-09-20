@@ -15,3 +15,4 @@ Tests (synthetic sample only; set MARKET_DESK_REAL_WORKBOOK to also run them on 
 
     python test_price_model.py
     python test_split_price.py
+    python test_app_data_switch.py

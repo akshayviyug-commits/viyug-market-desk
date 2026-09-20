@@ -97,45 +97,56 @@ def price_matrix(panel: Panel, market: str, last_n: int = 30):
     return panel.dates[idx], arr[idx]
 
 
-def weekday_effect(panel: Panel) -> dict:
-    """Mean daily price by weekday for the market with the longest history, with the day count behind each."""
-    best = max(("dam", "gdam", "rtm"), key=lambda m: int(np.isfinite({"gdam": panel.gdam, "dam": panel.dam, "rtm": panel.rtm}[m]).any(axis=1).sum()))
-    arr = {"gdam": panel.gdam, "dam": panel.dam, "rtm": panel.rtm}[best]
+def _weekday_block(arr: np.ndarray, dates) -> dict:
     have = np.isfinite(arr).all(axis=1)
-    lvl = pd.Series(np.nanmean(arr[have], axis=1), index=panel.dates[have])
-    names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    if not have.any():
+        return {"table": pd.DataFrame({"day": WEEKDAYS, "mean": np.nan, "n": 0}), "n_days": 0, "weekday_mean": float("nan"), "holidays": []}
+    lvl = pd.Series(np.nanmean(arr[have], axis=1), index=dates[have])
     grp = lvl.groupby(lvl.index.dayofweek)
-    out = pd.DataFrame({"day": names, "mean": [grp.mean().get(i, np.nan) for i in range(7)], "n": [int(grp.size().get(i, 0)) for i in range(7)]})
-    weekday_mean = float(lvl[lvl.index.dayofweek < 5].mean())
-    hol = []
-    for d in lvl.index:
-        if is_holiday(d) and d.dayofweek < 5:
-            hol.append({"date": d, "name": holiday_name(d), "price": float(lvl[d])})
-    return {"market": {"gdam": "G-DAM", "dam": "DAM", "rtm": "RTM"}[best], "table": out, "n_days": int(have.sum()),
-            "weekday_mean": weekday_mean, "holidays": hol,
-            "first": lvl.index.min(), "last": lvl.index.max()}
+    table = pd.DataFrame({"day": WEEKDAYS, "mean": [grp.mean().get(i, np.nan) for i in range(7)], "n": [int(grp.size().get(i, 0)) for i in range(7)]})
+    hol = [{"date": d, "name": holiday_name(d), "price": float(lvl[d])} for d in lvl.index if is_holiday(d) and d.dayofweek < 5]
+    return {"table": table, "n_days": int(have.sum()), "weekday_mean": float(lvl[lvl.index.dayofweek < 5].mean()), "holidays": hol}
 
 
-def cap_runs(panel: Panel, market: str = "gdam") -> dict:
-    """How long the price stays at the exchange cap once it gets there (runs of consecutive blocks)."""
+WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def weekday_effect(panel: Panel) -> dict:
+    """Mean daily price by weekday for the two markets we forecast, with the day count behind each."""
+    return {"gdam": _weekday_block(panel.gdam, panel.dates), "rtm": _weekday_block(panel.rtm, panel.dates)}
+
+
+def default_high_threshold(panel: Panel, market: str = "gdam") -> float:
+    """What counts as a high price is set by the data: the market's average price plus half a standard deviation in this
+    workbook, to the nearest Rs100 (a level well above normal, without being pinned to the price cap)."""
+    arr = {"gdam": panel.gdam, "dam": panel.dam, "rtm": panel.rtm}[market]
+    v = arr[np.isfinite(arr)]
+    if not v.size:
+        return CAP
+    return float(min(CAP, round(float(v.mean() + 0.5 * v.std()), -2)))
+
+
+def high_runs(panel: Panel, market: str = "gdam", threshold: float | None = None) -> dict:
+    """How long the price stays at or above `threshold` once it gets there (runs of consecutive blocks)."""
+    thr = default_high_threshold(panel, market) if threshold is None else float(threshold)
     arr = {"gdam": panel.gdam, "dam": panel.dam, "rtm": panel.rtm}[market]
     have = np.isfinite(arr).all(axis=1)
     runs = []
     for row in arr[have]:
-        cap = row >= CAP - 1
+        high = row >= thr
         i = 0
         while i < 96:
-            if cap[i]:
+            if high[i]:
                 j = i
-                while j < 96 and cap[j]:
+                while j < 96 and high[j]:
                     j += 1
                 runs.append(j - i)
                 i = j
             else:
                 i += 1
-    share = float((arr[have] >= CAP - 1).mean()) if have.any() else float("nan")
-    return {"runs": runs, "share": share, "n_days": int(have.sum()), "median": float(np.median(runs)) if runs else 0.0,
-            "longest": int(max(runs)) if runs else 0}
+    share = float((arr[have] >= thr).mean()) if have.any() else float("nan")
+    return {"runs": runs, "share": share, "threshold": thr, "n_days": int(have.sum()),
+            "median": float(np.median(runs)) if runs else 0.0, "longest": int(max(runs)) if runs else 0}
 
 
 def spread_by_cluster(panel: Panel, rec: float = 300.0) -> pd.DataFrame:
